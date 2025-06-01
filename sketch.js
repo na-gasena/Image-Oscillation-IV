@@ -58,6 +58,16 @@ let keyIsDownMap = {}; // 例: {'a': true, 's': false, ...}
 
 const midiKeyChars = ['a','w','s','e','d','f','t','g','y','h','u','j'];
 
+
+/* ── ここから追加: XY 描画用 ── */
+let customTableR  = new Float32Array(TABLE_SIZE);   // 右チャンネル用
+let crushedTableR = new Float32Array(TABLE_SIZE);   // 右チャンネル量子化
+
+let editingXY  = false;   // XY お絵描きモード
+let xyDrawPts  = [];      // XY で描いた点列
+/* ── ここまで追加 ── */
+
+
 /*
 ──────────────────────────────────────────────
  初期化: setup()
@@ -303,6 +313,12 @@ function mousePressed(){
     crushedTable[prevPadIdx] = customTable[prevPadIdx];
     applyGlitch();
   }
+
+  // ▼ XY 描画開始判定
+  if (!editing && mxInXY(mouseX, mouseY)) {
+    editingXY = true;
+    xyDrawPts = [{ x: mouseX, y: mouseY }];
+  }
 }
 
 function mouseDragged(){
@@ -331,6 +347,11 @@ function mouseDragged(){
     prevPadY   = y;
     applyGlitch();
   }
+
+  if (editingXY && mxInXY(mouseX, mouseY)) {
+    xyDrawPts.push({ x: mouseX, y: mouseY });
+  }
+  
 }
 
 function mouseReleased(){
@@ -350,6 +371,14 @@ function mouseReleased(){
     }
     mouseKeyDownIndex = null;
   }
+
+  if (editingXY) {
+    editingXY = false;
+    if (xyDrawPts.length > 4) {
+      processXYToWave();
+    }
+  }
+  
 }
 
 /*
@@ -367,6 +396,14 @@ function drawXY(){
     const px  = map(left[i],    -1,1, xyX0, xyX0+xySize);
     const py  = map(right[i],   -1,1, xyY0+xySize, xyY0);
     line(px0, py0, px, py);
+  }
+  // XY お絵描き中のプレビュー（シアン）
+  if (editingXY) {
+    stroke(0, 255, 255);
+    noFill();
+    beginShape();
+    xyDrawPts.forEach(p => vertex(p.x, p.y));
+    endShape();
   }
 }
 
@@ -408,6 +445,83 @@ function drawUIWaveButtons(){
     noStroke(); circle(waveBtnX[i], waveBtnY, waveBtnR*2);
   }
 }
+
+
+/* ── ここから追加: XY 描画用関数 ── */
+// XY 域内か判定
+function mxInXY(x, y) {
+  return x >= xyX0 && x <= xyX0 + xySize && y >= xyY0 && y <= xyY0 + xySize;
+}
+
+// 右チャンネル側の量子化
+function applyGlitchR() {
+  const q = 2.0 / glitchSteps;
+  for (let i = 0; i < TABLE_SIZE; i++) {
+    crushedTableR[i] = Math.round(customTableR[i] / q) * q;
+  }
+}
+
+// 任意テーブル → PeriodicWave 生成
+function createPW(tbl) {
+  const N = TABLE_SIZE;
+  const H = N / 2;
+  const re = new Float32Array(H);
+  const im = new Float32Array(H);
+  for (let k = 1; k < H; k++) {
+    let sr = 0, si = 0;
+    for (let n = 0; n < N; n++) {
+      const ph = TWO_PI * k * n / N;
+      sr += tbl[n] * Math.cos(ph);
+      si += -tbl[n] * Math.sin(ph);
+    }
+    re[k] = sr / N;
+    im[k] = si / N;
+  }
+  return getAudioContext().createPeriodicWave(re, im, { disableNormalization: true });
+}
+
+// L/R を別々に更新
+function updateOscPeriodicWaveXY() {
+  oscL.oscillator.setPeriodicWave(createPW(crushedTable));
+  oscR.oscillator.setPeriodicWave(createPW(crushedTableR));
+}
+
+// XY の軌跡を 64 サンプルにリサンプリングして波形へ
+function processXYToWave() {
+  // 総距離を求める
+  let seg = [], total = 0;
+  for (let i = 1; i < xyDrawPts.length; i++) {
+    const d = dist(
+      xyDrawPts[i - 1].x, xyDrawPts[i - 1].y,
+      xyDrawPts[i].x, xyDrawPts[i].y
+    );
+    seg.push(d);
+    total += d;
+  }
+  const step = total / (TABLE_SIZE - 1);
+  let acc = 0, idx = 1;
+
+  for (let s = 0; s < TABLE_SIZE; s++) {
+    const target = s * step;
+    while (acc + seg[idx - 1] < target && idx < seg.length) {
+      acc += seg[idx - 1];
+      idx++;
+    }
+    const t = (target - acc) / seg[idx - 1];
+    const x = lerp(xyDrawPts[idx - 1].x, xyDrawPts[idx].x, t);
+    const y = lerp(xyDrawPts[idx - 1].y, xyDrawPts[idx].y, t);
+    // X → L, Y → R
+    customTable[s]  = map(x, xyX0, xyX0 + xySize, -1, 1);
+    customTableR[s] = map(y, xyY0 + xySize, xyY0, -1, 1);
+  }
+  applyGlitch();   // 左
+  applyGlitchR();  // 右
+  updateOscPeriodicWaveXY();
+}
+/* ── ここまで追加 ── */
+
+
+
 
 /* －－ ユーティリティ －－ */
 function risingEdge(buf){
