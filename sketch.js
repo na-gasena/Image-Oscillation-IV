@@ -16,11 +16,11 @@ let currentWave = 'sine';  // 'sine' | 'triangle' | 'square' | 'custom'
 const TABLE_SIZE = 64;
 let customTable   = new Float32Array(TABLE_SIZE);
 let crushedTable  = new Float32Array(TABLE_SIZE);
-let glitchSteps   = 16;      // 量子化分解能 (4–64)
+let glitchSteps   = 64;      // 量子化分解能 (4–64)
 let periodicWave  = null;    // Web Audio の PeriodicWave インスタンス
 
 // ––––– UI 要素 (HTML)
-let freqSlider, ratioSlider, glitchSlider;  // p5.dom range input
+let freqLabel, freqSlider, ratioLabel, ratioSlider, glitchLabel, glitchSlider;  // p5.dom range input
 
 // ––––– レイアウト座標 (Processing 版に合わせて計算)
 let ytR, ytCY, ytCXL, ytCXR; // Y‑T 円表示の中心・半径
@@ -99,9 +99,14 @@ function setup(){
   for(let i=0;i<3;i++) waveBtnX[i] = startX + i * (waveBtnR*2 + 20);
 
   // ▼ HTML Range スライダ UI
-  freqSlider   = createSlider(20, 5000, 440, 1).position(10, 10).style('width','150px');
-  ratioSlider  = createSlider(0.1, 4.0, 1.0, 0.01).position(10, 40).style('width','150px');
-  glitchSlider = createSlider(4, 64, 16, 1).position(10, 70).style('width','150px');
+  freqLabel   = createDiv('Freq').position(ytCXR-80, padY0-24).style('color', '#fff');
+  freqSlider  = createSlider(20, 5000, 440, 1).position(ytCXR-80, padY0).style('width','150px');
+
+  ratioLabel  = createDiv('Ratio').position(ytCXL-80, padY0-24).style('color', '#fff');
+  ratioSlider = createSlider(0.1, 4.0, 1.0, 0.01).position(ytCXL-80, padY0).style('width','150px');
+
+  glitchLabel = createDiv('Glitch').position(ytCXL-80, padY0+16).style('color', '#fff');
+  glitchSlider= createSlider(4, 64, 64, 1).position(ytCXL-80, padY0+40).style('width','150px');
 
   // ▼ デフォルト波形配列生成 (Sine)
   setDefaultWave('sine');
@@ -153,9 +158,9 @@ function draw(){
 
   // ––– デバッグテキスト
   fill(255); noStroke();
-  text(`Freq : ${baseFreq.toFixed(1)} Hz`, 180, 12);
-  text(`Ratio: ${ratio.toFixed(2)}`,       180, 32);
-  text(`Glitch: ${glitchSteps}`,           180, 52);
+  text(`Freq : ${baseFreq.toFixed(1)} Hz`, 25, 12);
+  text(`Ratio: ${ratio.toFixed(2)}`,       25, 32);
+  text(`Glitch: ${glitchSteps}`,           25, 52);
 
   // ––– アルペジエータ (Up モード固定)
   const stepDur = 60000 / BPM_FIXED / DIV_FIXED;
@@ -180,7 +185,13 @@ function setBaseFreq(f){
   oscR.freq(baseFreq * ratio);
 }
 function setRatio(r){
-  ratio = r;
+  // 1.00付近は強制的に1.00にスナップ
+  if (Math.abs(r - 1.0) < 0.005) {
+    ratio = 1.0;
+  } else {
+    ratio = Math.round(r * 100) / 100;
+  }
+  oscL.freq(baseFreq);
   oscR.freq(baseFreq * ratio);
 }
 function noteOn(midi){
@@ -274,7 +285,7 @@ function mousePressed(){
   }
 
   // ▼ 波形切替ボタン判定
-  for(let i=0;i<2;i++){
+  for(let i=0;i<3;i++){
     if(dist(mouseX, mouseY, waveBtnX[i], waveBtnY) < waveBtnR){
       changeWaveIndex(i);
       return;
@@ -400,7 +411,22 @@ function drawUIWaveButtons(){
 
 /* －－ ユーティリティ －－ */
 function risingEdge(buf){
-  for(let i=1;i<buf.length;i++) if(buf[i-1]<0 && buf[i]>=0) return i;
+  // 最大値のインデックスを探す
+  let maxIdx = 0;
+  let maxVal = -Infinity;
+  for(let i=0;i<buf.length;i++){
+    if(buf[i] > maxVal){
+      maxVal = buf[i];
+      maxIdx = i;
+    }
+  }
+  // 最大値の少し前から0クロス（負→正）を探す
+  for(let offset=0; offset<buf.length; offset++){
+    let i = (maxIdx + buf.length - offset) % buf.length;
+    if(buf[(i-1+buf.length)%buf.length]<0 && buf[i]>=0){
+      return i;
+    }
+  }
   return 0;
 }
 function inPad(mx,my){
