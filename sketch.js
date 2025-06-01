@@ -52,6 +52,12 @@ let prevFreqSlider = null;
 let prevRatioSlider = null;
 let prevGlitchSlider = null;
 
+let mouseKeyDownIndex = null; // マウスで押している鍵盤のインデックス
+
+let keyIsDownMap = {}; // 例: {'a': true, 's': false, ...}
+
+const midiKeyChars = ['a','w','s','e','d','f','t','g','y','h','u','j'];
+
 /*
 ──────────────────────────────────────────────
  初期化: setup()
@@ -160,6 +166,8 @@ function draw(){
       lastStepMs = millis();
     }
   }
+
+  syncKeyboardNotes();
 }
 
 /*
@@ -240,27 +248,10 @@ function changeWaveIndex(idx){
 function keyPressed(){
   // 数字キー 1–3 → 波形切替
   if(key>='1' && key<='3') changeWaveIndex(int(key)-1);
-
-  // MIDI キー
-  const m = keyToMidi(key);
-  if(m>=0 && !notesHeld.includes(m)){
-    notesHeld.push(m);
-    setUIKey(m, true);
-    arpIndex = 0;
-  }
-
-  // TAB キーのブラウザ挙動を防止
   if(keyCode === TAB) return false;
 }
 function keyReleased(){
-  const m = keyToMidi(key);
-  if(m>=0){
-    notesHeld = notesHeld.filter(v=>v!==m);
-    setUIKey(m,false);
-    arpIndex = 0;
-    // ここでsetBaseFreqやsetRatioは呼ばない
-    // 何もしないことで、最後に鳴っていた周波数が維持される
-  }
+  // 何もしない（syncKeyboardNotesで全て管理するため）
 }
 
 function mousePressed(){
@@ -271,12 +262,13 @@ function mousePressed(){
   for(let i=0;i<12;i++){
     const kx = padX0 + padW * i / 4 - 120;
     if(dist(mouseX, mouseY, kx, keyY) < keyR){
-      if(!uiKeyOn[i]){ // すでにONなら何もしない
+      if(!uiKeyOn[i]){
         uiKeyOn[i] = true;
         const m = midiKeys[i];
         if(!notesHeld.includes(m)) notesHeld.push(m);
         arpIndex = 0;
       }
+      mouseKeyDownIndex = i; // どの鍵盤を押したか記録
       return;
     }
   }
@@ -337,19 +329,15 @@ function mouseReleased(){
     prevPadY   = null;
   }
 
-  // ▼ 鍵盤リリース判定
-  for(let i=0;i<12;i++){
-    const kx = padX0 + padW * i / 4 - 120;
-    if(dist(mouseX, mouseY, kx, keyY) < keyR){
-      if(uiKeyOn[i]){
-        uiKeyOn[i] = false;
-        const m = midiKeys[i];
-        notesHeld = notesHeld.filter(v=>v!==m);
-        arpIndex = 0;
-        // ここでsetBaseFreqやsetRatioは呼ばない
-      }
-      return;
+  // ▼ 押していた鍵盤だけOFFにする
+  if(mouseKeyDownIndex !== null){
+    if(uiKeyOn[mouseKeyDownIndex]){
+      uiKeyOn[mouseKeyDownIndex] = false;
+      const m = midiKeys[mouseKeyDownIndex];
+      notesHeld = notesHeld.filter(v=>v!==m);
+      arpIndex = 0;
     }
+    mouseKeyDownIndex = null;
   }
 }
 
@@ -446,4 +434,26 @@ function smoothTable(table, windowSize=3){
     result[i] = sum / count;
   }
   return result;
+}
+
+function syncKeyboardNotes(){
+  for(let i=0; i<midiKeyChars.length; i++){
+    const k = midiKeyChars[i];
+    const midi = midiKeys[i];
+    if(keyIsDown(k.toUpperCase().charCodeAt(0)) || keyIsDown(k.toLowerCase().charCodeAt(0))){
+      // 物理的に押されている
+      if(!notesHeld.includes(midi)){
+        notesHeld.push(midi);
+        setUIKey(midi, true);
+        arpIndex = 0;
+      }
+    }else{
+      // 物理的に離されている
+      if(notesHeld.includes(midi)){
+        notesHeld = notesHeld.filter(v => v !== midi);
+        setUIKey(midi, false);
+        arpIndex = 0;
+      }
+    }
+  }
 }
