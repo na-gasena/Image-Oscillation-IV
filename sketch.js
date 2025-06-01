@@ -43,6 +43,15 @@ let waveOn     = [true, false, false]; // 波形ボタンの ON/OFF
 // ––––– 編集フラグ
 let editing    = false;      // カスタム波形描画中か
 
+let prevPadIdx = null;
+let prevPadY   = null;
+
+let lastPlayedMidi = null;
+
+let prevFreqSlider = null;
+let prevRatioSlider = null;
+let prevGlitchSlider = null;
+
 /*
 ──────────────────────────────────────────────
  初期化: setup()
@@ -95,6 +104,10 @@ function setup(){
 
   // ▼ AudioContext をユーザ操作で開始するためのヒント
   textSize(14); textAlign(LEFT, TOP);
+
+  prevFreqSlider = freqSlider.value();
+  prevRatioSlider = ratioSlider.value();
+  prevGlitchSlider = glitchSlider.value();
 }
 
 /*
@@ -104,10 +117,22 @@ function setup(){
 function draw(){
   background(0);
 
-  // ––– スライダ値の反映 (リアルタイム)
-  if(freqSlider.value() !== baseFreq)   setBaseFreq(freqSlider.value());
-  if(ratioSlider.value() !== ratio)     setRatio(ratioSlider.value());
-  if(glitchSlider.value() !== glitchSteps){ glitchSteps = glitchSlider.value(); applyGlitch(); }
+  // --- スライダ値の反映 (リアルタイム) ---
+  // スライダ値が変化した瞬間は必ず反映
+  if(freqSlider.value() !== prevFreqSlider){
+    setBaseFreq(freqSlider.value());
+    lastPlayedMidi = null; // スライダ操作時はlastPlayedMidiをリセット
+    prevFreqSlider = freqSlider.value();
+  }
+  if(ratioSlider.value() !== prevRatioSlider){
+    setRatio(ratioSlider.value());
+    prevRatioSlider = ratioSlider.value();
+  }
+  if(glitchSlider.value() !== prevGlitchSlider){
+    glitchSteps = glitchSlider.value();
+    applyGlitch();
+    prevGlitchSlider = glitchSlider.value();
+  }
 
   // ––– トリガ位置 (零交差検出) を求める
   const trig = risingEdge(fftL.waveform());
@@ -128,10 +153,12 @@ function draw(){
 
   // ––– アルペジエータ (Up モード固定)
   const stepDur = 60000 / BPM_FIXED / DIV_FIXED;
-  if(millis() - lastStepMs >= stepDur && notesHeld.length > 0){
-    noteOn(notesHeld[arpIndex % notesHeld.length]);
-    arpIndex++;
-    lastStepMs = millis();
+  if(notesHeld.length > 0){
+    if(millis() - lastStepMs >= stepDur){
+      noteOn(notesHeld[arpIndex % notesHeld.length]);
+      arpIndex = (arpIndex + 1) % notesHeld.length;
+      lastStepMs = millis();
+    }
   }
 }
 
@@ -151,6 +178,7 @@ function setRatio(r){
 function noteOn(midi){
   const f = midiToFreq(midi); // p5.sound 付属
   setBaseFreq(f);
+  lastPlayedMidi = midi;
 }
 
 /* －－ 波形関連 －－ */
@@ -160,21 +188,27 @@ function setDefaultWave(type){
     if     (type==='sine')     customTable[i] = Math.sin(TWO_PI * t);
     else if(type==='triangle') customTable[i] = 1 - 4*Math.abs(t - 0.5);
     else if(type==='square')   customTable[i] = (t < 0.5 ? 1 : -1);
-    crushedTable[i] = customTable[i];
+    // crushedTableの更新はapplyGlitch()で行う
   }
 }
 function applyGlitch(){
   const q = 2.0 / glitchSteps;
   for(let i=0;i<TABLE_SIZE;i++) crushedTable[i] = Math.round(customTable[i]/q)*q;
-  if(currentWave==='custom') updateOscPeriodicWave();
+  updateOscPeriodicWave(); // 必ず呼ぶ
 }
 function updateOscPeriodicWave(){
-  // customTable/crushedTable → Web Audio PeriodicWave に変換 (DFT)
   const ac    = getAudioContext();
   const N     = TABLE_SIZE;
-  const real  = new Float32Array(N);
-  const imag  = new Float32Array(N);
-  for(let k=0;k<N;k++){
+  const harmonics = N/2;
+  const real  = new Float32Array(harmonics);
+  const imag  = new Float32Array(harmonics);
+
+  // DC成分は0
+  real[0] = 0;
+  imag[0] = 0;
+
+  // DFTで各ハーモニクス成分を計算
+  for(let k=1;k<harmonics;k++){
     let sumRe = 0, sumIm = 0;
     for(let n=0;n<N;n++){
       const phase = TWO_PI * k * n / N;
@@ -184,22 +218,19 @@ function updateOscPeriodicWave(){
     real[k] = sumRe / N;
     imag[k] = sumIm / N;
   }
-  periodicWave = ac.createPeriodicWave(real, imag, {disableNormalization:false});
+  periodicWave = ac.createPeriodicWave(real, imag, {disableNormalization:true});
   oscL.oscillator.setPeriodicWave(periodicWave);
   oscR.oscillator.setPeriodicWave(periodicWave);
 }
 
 function changeWaveIndex(idx){
-  // idx: 0=Sine 1=Tri 2=Square 3=Custom
-  const mapping = ['sine','triangle','square','custom'];
+  // idx: 0=Sine 1=Tri 2=Square
+  const mapping = ['sine','triangle','square'];
   currentWave = mapping[idx];
   waveOn = waveOn.map((_,i)=>i===idx);
-  if(currentWave==='custom'){
-    updateOscPeriodicWave();
-  } else {
-    oscL.setType(currentWave);
-    oscR.setType(currentWave);
-  }
+  setDefaultWave(currentWave); // ←ここでcustomTableを上書き
+  applyGlitch();               // ←crushedTableも更新
+  updateOscPeriodicWave();     // ←必ずウェーブテーブルを反映
 }
 
 /*
@@ -207,14 +238,15 @@ function changeWaveIndex(idx){
  入力イベント
 ──────────────────────────────────────────────*/
 function keyPressed(){
-  // 数字キー 1–4 → 波形切替
-  if(key>='1' && key<='4') changeWaveIndex(int(key)-1);
+  // 数字キー 1–3 → 波形切替
+  if(key>='1' && key<='3') changeWaveIndex(int(key)-1);
 
   // MIDI キー
   const m = keyToMidi(key);
   if(m>=0 && !notesHeld.includes(m)){
     notesHeld.push(m);
     setUIKey(m, true);
+    arpIndex = 0;
   }
 
   // TAB キーのブラウザ挙動を防止
@@ -226,6 +258,8 @@ function keyReleased(){
     notesHeld = notesHeld.filter(v=>v!==m);
     setUIKey(m,false);
     arpIndex = 0;
+    // ここでsetBaseFreqやsetRatioは呼ばない
+    // 何もしないことで、最後に鳴っていた周波数が維持される
   }
 }
 
@@ -237,12 +271,10 @@ function mousePressed(){
   for(let i=0;i<12;i++){
     const kx = padX0 + padW * i / 4 - 120;
     if(dist(mouseX, mouseY, kx, keyY) < keyR){
-      uiKeyOn[i] = !uiKeyOn[i];
-      const m = midiKeys[i];
-      if(uiKeyOn[i]){
+      if(!uiKeyOn[i]){ // すでにONなら何もしない
+        uiKeyOn[i] = true;
+        const m = midiKeys[i];
         if(!notesHeld.includes(m)) notesHeld.push(m);
-      } else {
-        notesHeld = notesHeld.filter(v=>v!==m);
         arpIndex = 0;
       }
       return;
@@ -250,7 +282,7 @@ function mousePressed(){
   }
 
   // ▼ 波形切替ボタン判定
-  for(let i=0;i<3;i++){
+  for(let i=0;i<2;i++){
     if(dist(mouseX, mouseY, waveBtnX[i], waveBtnY) < waveBtnR){
       changeWaveIndex(i);
       return;
@@ -258,20 +290,67 @@ function mousePressed(){
   }
 
   // ▼ カスタム波形パッド開始
-  if(inPad(mouseX, mouseY)) editing = true;
+  if(inPad(mouseX, mouseY)) {
+    editing = true;
+    prevPadIdx = int(map(mouseX, padX0, padX0+padW, 0, TABLE_SIZE-1));
+    prevPadIdx = constrain(prevPadIdx, 0, TABLE_SIZE-1);
+    prevPadY   = mouseY;
+    // 1点目も描画
+    customTable[prevPadIdx]  = map(mouseY, padY0, padY0+padH, 1, -1);
+    crushedTable[prevPadIdx] = customTable[prevPadIdx];
+    applyGlitch();
+  }
 }
 
 function mouseDragged(){
   if(editing && inPad(mouseX, mouseY)){
     let idx = int(map(mouseX, padX0, padX0+padW, 0, TABLE_SIZE-1));
     idx = constrain(idx, 0, TABLE_SIZE-1);
-    customTable[idx]  = map(mouseY, padY0, padY0+padH, 1, -1);
-    crushedTable[idx] = customTable[idx];
+    let y  = mouseY;
+
+    if(prevPadIdx !== null){
+      // 線形補間
+      let from = prevPadIdx;
+      let to   = idx;
+      if(from > to){ [from, to] = [to, from]; }
+      for(let i=from; i<=to; i++){
+        // yも線形補間
+        let t = (to === from) ? 0 : (i - from) / (to - from);
+        let interpY = prevPadY + (y - prevPadY) * t;
+        customTable[i]  = map(interpY, padY0, padY0+padH, 1, -1);
+        crushedTable[i] = customTable[i];
+      }
+    }else{
+      customTable[idx]  = map(y, padY0, padY0+padH, 1, -1);
+      crushedTable[idx] = customTable[idx];
+    }
+    prevPadIdx = idx;
+    prevPadY   = y;
+    applyGlitch();
   }
 }
 
 function mouseReleased(){
-  if(editing){ editing = false; applyGlitch(); }
+  if(editing){
+    editing = false;
+    prevPadIdx = null;
+    prevPadY   = null;
+  }
+
+  // ▼ 鍵盤リリース判定
+  for(let i=0;i<12;i++){
+    const kx = padX0 + padW * i / 4 - 120;
+    if(dist(mouseX, mouseY, kx, keyY) < keyR){
+      if(uiKeyOn[i]){
+        uiKeyOn[i] = false;
+        const m = midiKeys[i];
+        notesHeld = notesHeld.filter(v=>v!==m);
+        arpIndex = 0;
+        // ここでsetBaseFreqやsetRatioは呼ばない
+      }
+      return;
+    }
+  }
 }
 
 /*
@@ -350,4 +429,21 @@ function keyToMidi(k){
 function setUIKey(midi,on){
   const idx = midiKeys.indexOf(midi);
   if(idx>=0) uiKeyOn[idx] = on;
+}
+
+function smoothTable(table, windowSize=3){
+  const N = table.length;
+  const result = new Float32Array(N);
+  for(let i=0;i<N;i++){
+    let sum = 0, count = 0;
+    for(let j=-Math.floor(windowSize/2); j<=Math.floor(windowSize/2); j++){
+      let idx = i + j;
+      if(idx >= 0 && idx < N){
+        sum += table[idx];
+        count++;
+      }
+    }
+    result[i] = sum / count;
+  }
+  return result;
 }
