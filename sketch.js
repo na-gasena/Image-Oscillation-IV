@@ -59,13 +59,14 @@ let keyIsDownMap = {}; // 例: {'a': true, 's': false, ...}
 const midiKeyChars = ['a','w','s','e','d','f','t','g','y','h','u','j'];
 
 
-/* ── ここから追加: XY 描画用 ── */
+/* ──  XY 描画用 ── */
 let customTableR  = new Float32Array(TABLE_SIZE);   // 右チャンネル用
 let crushedTableR = new Float32Array(TABLE_SIZE);   // 右チャンネル量子化
 
 let editingXY  = false;   // XY お絵描きモード
 let xyDrawPts  = [];      // XY で描いた点列
-/* ── ここまで追加 ── */
+
+
 
 
 /*
@@ -194,16 +195,45 @@ function setBaseFreq(f){
   oscL.freq(baseFreq);
   oscR.freq(baseFreq * ratio);
 }
+
+
 function setRatio(r){
-  // 1.00付近は強制的に1.00にスナップ
-  if (Math.abs(r - 1.0) < 0.005) {
+  if (Math.abs(r - 1.0) < 0.05) {
     ratio = 1.0;
+    oscR.freq(baseFreq);          // 同期させて…
+    resetPhase();                 // ← 位相リセットを追加
   } else {
     ratio = Math.round(r * 100) / 100;
+    oscR.freq(baseFreq * ratio);
   }
+}
+
+function resetPhase(){
+  // 旧ノード停止
+  oscL.stop();
+  oscR.stop();
+
+  // 新規ノードを同じ設定で生成
+  oscL = new p5.Oscillator('sine');
+  oscR = new p5.Oscillator('sine');
+  oscL.amp(0.5);   oscR.amp(0.5);
+  oscL.pan(-1);    oscR.pan(1);
+  oscL.start();    oscR.start();
+
+  // 周波数と波形を復元
   oscL.freq(baseFreq);
   oscR.freq(baseFreq * ratio);
+  updateOscPeriodicWaveXY();   // ← 既存関数で L/R の PeriodicWave を貼り直す
+
+  // FFT の入力を新ノードへバインド
+  fftL.setInput(oscL);
+  fftR.setInput(oscR);
 }
+
+
+
+
+
 function noteOn(midi){
   const f = midiToFreq(midi); // p5.sound 付属
   setBaseFreq(f);
@@ -256,11 +286,20 @@ function changeWaveIndex(idx){
   // idx: 0=Sine 1=Tri 2=Square
   const mapping = ['sine','triangle','square'];
   currentWave = mapping[idx];
-  waveOn = waveOn.map((_,i)=>i===idx);
-  setDefaultWave(currentWave); // ←ここでcustomTableを上書き
-  applyGlitch();               // ←crushedTableも更新
-  updateOscPeriodicWave();     // ←必ずウェーブテーブルを反映
+  waveOn = waveOn.map((_, i) => i === idx);
+
+  setDefaultWave(currentWave);          // customTable（L）を生成
+                                        // ↓ ここから追加 ----------------
+  for (let i = 0; i < TABLE_SIZE; i++) {
+    customTableR[i]  = customTable[i];  // R も同じ波形で上書き
+    crushedTableR[i] = crushedTable[i]; // Glitch 前の値もコピー
+  }
+                                        // ↑ ここまで追加 ----------------
+  applyGlitch();                        // L 側量子化
+  applyGlitchR();                       // R 側量子化
+  updateOscPeriodicWaveXY();            // L/R の PeriodicWave を再適用
 }
+
 
 /*
 ──────────────────────────────────────────────
@@ -318,6 +357,7 @@ function mousePressed(){
   if (!editing && mxInXY(mouseX, mouseY)) {
     editingXY = true;
     xyDrawPts = [{ x: mouseX, y: mouseY }];
+    //xyDrawPts.push({ x: mouseX, y: mouseY }); //
   }
 }
 
@@ -350,7 +390,9 @@ function mouseDragged(){
 
   if (editingXY && mxInXY(mouseX, mouseY)) {
     xyDrawPts.push({ x: mouseX, y: mouseY });
+    updateTablesFromXY(xyDrawPts);      // ★リアルタイム更新
   }
+  
   
 }
 
@@ -374,10 +416,10 @@ function mouseReleased(){
 
   if (editingXY) {
     editingXY = false;
-    if (xyDrawPts.length > 4) {
-      processXYToWave();
+    if (xyDrawPts.length > 4) {         // 十分点があれば
+      updateTablesFromXY(xyDrawPts);    // ★最終確定
     }
-  }
+  }  
   
 }
 
@@ -387,6 +429,12 @@ function mouseReleased(){
 ──────────────────────────────────────────────*/
 function drawXY(){
   noStroke(); fill(0, 15); rect(xyX0, xyY0, xySize, xySize);
+
+  /* 波形表示エリアをグレー枠で囲む */
+  stroke(180);
+  noFill();
+  rect(xyX0, xyY0, xySize, xySize);
+
   const left  = fftL.waveform();
   const right = fftR.waveform();
   stroke(0, 255, 0); strokeWeight(2);
@@ -397,14 +445,7 @@ function drawXY(){
     const py  = map(right[i],   -1,1, xyY0+xySize, xyY0);
     line(px0, py0, px, py);
   }
-  // XY お絵描き中のプレビュー（シアン）
-  if (editingXY) {
-    stroke(0, 255, 255);
-    noFill();
-    beginShape();
-    xyDrawPts.forEach(p => vertex(p.x, p.y));
-    endShape();
-  }
+  
 }
 
 function drawYTcircle(buf, cx, cy, r, startIdx){
@@ -447,7 +488,7 @@ function drawUIWaveButtons(){
 }
 
 
-/* ── ここから追加: XY 描画用関数 ── */
+/* ── XY 描画用関数 ── */
 // XY 域内か判定
 function mxInXY(x, y) {
   return x >= xyX0 && x <= xyX0 + xySize && y >= xyY0 && y <= xyY0 + xySize;
@@ -486,39 +527,76 @@ function updateOscPeriodicWaveXY() {
   oscR.oscillator.setPeriodicWave(createPW(crushedTableR));
 }
 
-// XY の軌跡を 64 サンプルにリサンプリングして波形へ
-function processXYToWave() {
-  // 総距離を求める
+
+function updateTablesFromXY(points){
+  if (points.length < 2) return;
+
+  /* -------- マウス座標を直接 -1〜+1 にマップ -------- */
+  const toNorm = p => ({
+    x: map(p.x, xyX0, xyX0 + xySize, -1, 1, true),        // 左=−1 右=+1
+    y: map(p.y, xyY0 + xySize, xyY0, 1, -1, true)         // 下=−1 上=+1
+  });
+  const norm    = points.map(toNorm);
+
+  /* ---- 64 サンプル抽出（以前と同じリサンプリング） ---- */
   let seg = [], total = 0;
-  for (let i = 1; i < xyDrawPts.length; i++) {
-    const d = dist(
-      xyDrawPts[i - 1].x, xyDrawPts[i - 1].y,
-      xyDrawPts[i].x, xyDrawPts[i].y
-    );
-    seg.push(d);
-    total += d;
+  for (let i = 1; i < norm.length; i++) {
+    const d = dist(norm[i-1].x, norm[i-1].y, norm[i].x, norm[i].y);
+    seg.push(d); total += d;
   }
   const step = total / (TABLE_SIZE - 1);
   let acc = 0, idx = 1;
-
   for (let s = 0; s < TABLE_SIZE; s++) {
-    const target = s * step;
-    while (acc + seg[idx - 1] < target && idx < seg.length) {
-      acc += seg[idx - 1];
-      idx++;
+    const tDist = s * step;
+    while (acc + seg[idx - 1] < tDist && idx < seg.length) {
+      acc += seg[idx - 1]; idx++;
     }
-    const t = (target - acc) / seg[idx - 1];
-    const x = lerp(xyDrawPts[idx - 1].x, xyDrawPts[idx].x, t);
-    const y = lerp(xyDrawPts[idx - 1].y, xyDrawPts[idx].y, t);
-    // X → L, Y → R
-    customTable[s]  = map(x, xyX0, xyX0 + xySize, -1, 1);
-    customTableR[s] = map(y, xyY0 + xySize, xyY0, -1, 1);
+    const t = (tDist - acc) / seg[idx - 1];
+    const x = lerp(norm[idx - 1].x, norm[idx].x, t);
+    const y = lerp(norm[idx - 1].y, norm[idx].y, t);
+
+    customTable[s] = x;                 // 左チャンネル
+    const target   = (s * Math.round(ratio)) % TABLE_SIZE;
+    customTableR[target] = -y;          // 右チャンネル（反転・巻き取り）
   }
-  applyGlitch();   // 左
-  applyGlitchR();  // 右
+
+  applyGlitch();
+  applyGlitchR();
   updateOscPeriodicWaveXY();
+
+  /* 位相ずれを防ぐ */
+  oscL.phase(0);
+  oscR.phase(0);
 }
-/* ── ここまで追加 ── */
+
+
+
+
+
+/* XY 点列を XY 領域にフィットさせる */
+function normalizeXYPoints(points) {
+  let minX = Infinity, maxX = -Infinity, 
+      minY = Infinity, maxY = -Infinity;
+  points.forEach(p => {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  });
+
+  // 幅・高さを揃えて正方形に収める
+  const spanX = maxX - minX || 1;
+  const spanY = maxY - minY || 1;
+  const span   = max(spanX, spanY);       // 大きい方に合わせて等倍スケール
+  const cx     = (minX + maxX) / 2;
+  const cy     = (minY + maxY) / 2;
+
+  // 中心を正方形中央へ移動し、-1〜+1 に収める
+  return points.map(p => ({
+    x: ((p.x - cx) / span) * 2,
+    y: ((p.y - cy) / span) * 2
+  }));
+}
 
 
 
