@@ -22,6 +22,7 @@ let periodicWave  = null;    // Web Audio の PeriodicWave インスタンス
 // ––––– UI 要素 (HTML)
 let freqLabel, freqSlider, ratioLabel, ratioSlider, glitchLabel, glitchSlider;  // p5.dom range input
 let octaveUpBtn, octaveDownBtn; // オクターブ変更ボタン
+let triggerModeBtn; // トリガーモード切替ボタン
 let currentOctave = 0; // 現在のオクターブオフセット（-2から+2程度）
 
 // ––––– レイアウト座標 (Processing 版に合わせて計算)
@@ -68,6 +69,11 @@ let crushedTableR = new Float32Array(TABLE_SIZE);   // 右チャンネル量子�
 let editingXY  = false;   // XY お絵描きモード
 let xyDrawPts  = [];      // XY で描いた点列
 let xyDrawingUsed = false; // XYお絵描きが使用されたかどうか
+
+let lastRatioForReset = null;  // 位相リセット判定用
+let phaseCheckInterval = 0;    // 位相チェック用カウンター
+
+let useAdaptiveTrigger = true; // 適応的トリガーの使用フラグ
 
 
 
@@ -168,7 +174,7 @@ function draw(){
   }
 
   // ––– トリガ位置 (零交差検出) を求める
-  const trig = risingEdge(fftL.waveform());
+  const trig = adaptiveTrigger(fftL.waveform(), fftR.waveform());
 
   // ––– 描画 (Processing と同じ順序)
   drawYTcircle(fftL.waveform(), ytCXL, ytCY, ytR, trig);
@@ -180,6 +186,7 @@ function draw(){
 
   // ––– デバッグテキスト
   fill(255); noStroke();
+  textAlign(LEFT, TOP);
   text(`Freq : ${baseFreq.toFixed(1)} Hz`, 25, 12);
   text(`Ratio: ${ratio.toFixed(2)}`,       25, 32);
   text(`Glitch: ${glitchSteps}`,           25, 52);
@@ -193,6 +200,13 @@ function draw(){
       arpIndex = (arpIndex + 1) % notesHeld.length;
       lastStepMs = millis();
     }
+  }
+
+  // ––– 定期的な位相補正（周波数比が1.0の時のみ）
+  phaseCheckInterval++;
+  if (phaseCheckInterval >= 30 && Math.abs(ratio - 1.0) < 0.001) { // 約0.5秒間隔
+    syncPhases();
+    phaseCheckInterval = 0;
   }
 
   syncKeyboardNotes();
@@ -210,41 +224,79 @@ function setBaseFreq(f){
 
 
 function setRatio(r){
+  // 位相リセットは実際に比率が変更された時のみ実行
   if (Math.abs(r - 1.0) < 0.05) {
-    ratio = 1.0;
-    oscR.freq(baseFreq);          // 同期させて…
-    resetPhase();                 // ← 位相リセットを追加
+    if (lastRatioForReset !== 1.0) {
+      ratio = 1.0;
+      oscR.freq(baseFreq);
+      resetPhase();
+      lastRatioForReset = 1.0;
+    } else {
+      ratio = 1.0;
+      oscR.freq(baseFreq);
+      // 既に同期状態なら位相のみ微調整
+      syncPhases();
+    }
   } else {
-    ratio = Math.round(r * 100) / 100;
-    oscR.freq(baseFreq * ratio);
+    const newRatio = Math.round(r * 100) / 100;
+    if (Math.abs(newRatio - (lastRatioForReset || ratio)) > 0.01) {
+      ratio = newRatio;
+      oscR.freq(baseFreq * ratio);
+      lastRatioForReset = ratio;
+    }
   }
 }
 
 function resetPhase(){
-  // 旧ノード停止
-  oscL.stop();
-  oscR.stop();
+  // 旧ノード停止（少し待ってから停止）
+  setTimeout(() => {
+    oscL.stop();
+    oscR.stop();
+  }, 10);
 
   // 新規ノードを同じ設定で生成
   oscL = new p5.Oscillator('sine');
   oscR = new p5.Oscillator('sine');
   oscL.amp(0.5);   oscR.amp(0.5);
   oscL.pan(-1);    oscR.pan(1);
-  oscL.start();    oscR.start();
+  
+  // 同時スタートで位相を揃える
+  oscL.start();
+  oscR.start();
 
-  // 周波数と波形を復元
+  // 周波数設定（同期のため右チャンネルも同じ周波数に設定）
   oscL.freq(baseFreq);
   oscR.freq(baseFreq * ratio);
-  updateOscPeriodicWaveXY();   // ← 既存関数で L/R の PeriodicWave を貼り直す
+  
+  // 波形設定を復元
+  updateOscPeriodicWaveXY();
 
   // FFT の入力を新ノードへバインド
   fftL.setInput(oscL);
   fftR.setInput(oscR);
+  
+  // 初期位相を明示的に設定
+  setTimeout(() => {
+    try {
+      oscL.phase(0);
+      oscR.phase(0);
+    } catch(e) {
+      console.warn('位相設定に失敗しました:', e);
+    }
+  }, 50);
 }
 
-
-
-
+// 位相同期関数（軽量版）
+function syncPhases(){
+  // 現在の位相を取得して右チャンネルを左チャンネルに合わせる
+  try {
+    oscR.phase(0);
+    oscL.phase(0);
+  } catch(e) {
+    // フォールバック：位相設定に失敗した場合はリセット
+    resetPhase();
+  }
+}
 
 function noteOn(midi){
   // オクターブオフセットを適用
@@ -505,15 +557,49 @@ function drawXY(){
 
   const left  = fftL.waveform();
   const right = fftR.waveform();
-  stroke(0, 255, 0); strokeWeight(2);
-  for(let i=1;i<left.length;i++){
-    const px0 = map(left[i-1],  -1,1, xyX0, xyX0+xySize);
-    const py0 = map(right[i-1], -1,1, xyY0+xySize, xyY0);
-    const px  = map(left[i],    -1,1, xyX0, xyX0+xySize);
-    const py  = map(right[i],   -1,1, xyY0+xySize, xyY0);
-    line(px0, py0, px, py);
+  
+  // 波形データの安定化（移動平均による平滑化）
+  const smoothLeft = smoothWaveform(left, 3);
+  const smoothRight = smoothWaveform(right, 3);
+  
+  // 適応的トリガーまたはトリガーレス表示
+  let startIdx = 0;
+  if (useAdaptiveTrigger) {
+    startIdx = adaptiveTrigger(smoothLeft, smoothRight);
+  } else {
+    // トリガーレス：時間基準で滑らかに進行
+    const timeOffset = (millis() * 0.001 * baseFreq) % 1.0;
+    startIdx = Math.floor(timeOffset * smoothLeft.length);
   }
   
+  stroke(0, 255, 0); strokeWeight(2);
+  
+  // より安定した描画のため、適度な間隔でサンプリング
+  const step = max(1, Math.floor(smoothLeft.length / 200));
+  const n = smoothLeft.length;
+  
+  for(let i = 0; i < Math.floor(n / step); i++){
+    const idx0 = (startIdx + i * step) % n;
+    const idx1 = (startIdx + (i + 1) * step) % n;
+    
+    const px0 = map(smoothLeft[idx0],  -0.4, 0.4, xyX0, xyX0+xySize);
+    const py0 = map(smoothRight[idx0], -0.4, 0.4, xyY0+xySize, xyY0);
+    const px  = map(smoothLeft[idx1],  -0.4, 0.4, xyX0, xyX0+xySize);
+    const py  = map(smoothRight[idx1], -0.4, 0.4, xyY0+xySize, xyY0);
+    
+    // 範囲外の点は描画しない
+    if (px0 >= xyX0 && px0 <= xyX0+xySize && py0 >= xyY0 && py0 <= xyY0+xySize &&
+        px >= xyX0 && px <= xyX0+xySize && py >= xyY0 && py <= xyY0+xySize) {
+      line(px0, py0, px, py);
+    }
+  }
+  
+  // 位相情報表示（デバッグ用）
+  fill(255, 150); noStroke();
+  textAlign(LEFT, TOP);
+  textSize(10);
+  const currentPhase = phaseHistory.length > 0 ? 
+    phaseHistory[phaseHistory.length - 1] * 180 / Math.PI : 0;
 }
 
 function drawYTcircle(buf, cx, cy, r, startIdx){
@@ -686,7 +772,7 @@ function normalizeXYPoints(points) {
 
 /* －－ ユーティリティ －－ */
 function risingEdge(buf){
-  // 最大値のインデックスを探す
+  // 従来の左チャンネル単独トリガー（フォールバック用）
   let maxIdx = 0;
   let maxVal = -Infinity;
   for(let i=0;i<buf.length;i++){
@@ -704,6 +790,122 @@ function risingEdge(buf){
   }
   return 0;
 }
+
+// 適応的トリガー検出（左右両チャンネル対応）
+function adaptiveTrigger(bufL, bufR) {
+  const ratioInt = Math.round(ratio);
+  const isIntegerRatio = Math.abs(ratio - ratioInt) < 0.01;
+  
+  if (isIntegerRatio && Math.abs(ratio - 1.0) < 0.01) {
+    // 周波数比 1:1 の場合 → 複合ゼロクロス検出
+    return synchronizedTrigger(bufL, bufR);
+  } else if (isIntegerRatio) {
+    // 整数比の場合 → 周期的トリガー
+    return periodicTrigger(bufL, bufR, ratioInt);
+  } else {
+    // 非整数比の場合 → 位相追跡トリガー
+    return phaseTrackingTrigger(bufL, bufR);
+  }
+}
+
+// 同期トリガー（1:1専用）
+function synchronizedTrigger(bufL, bufR) {
+  const n = bufL.length;
+  let bestIdx = 0;
+  let minPhaseDiff = Infinity;
+  
+  // 両チャンネルの零交差点を探す
+  for (let i = 1; i < n; i++) {
+    const crossL = (bufL[i-1] < 0 && bufL[i] >= 0);
+    const crossR = (bufR[i-1] < 0 && bufR[i] >= 0);
+    
+    if (crossL || crossR) {
+      // 位相差を計算（両チャンネルの値の差）
+      const phaseDiff = Math.abs(bufL[i] - bufR[i]);
+      if (phaseDiff < minPhaseDiff) {
+        minPhaseDiff = phaseDiff;
+        bestIdx = i;
+      }
+    }
+  }
+  return bestIdx;
+}
+
+// 周期的トリガー（整数比用）
+function periodicTrigger(bufL, bufR, ratioInt) {
+  const n = bufL.length;
+  const period = Math.floor(n / ratioInt);
+  
+  // 左チャンネルの主要周期でトリガー
+  let maxCorr = -Infinity;
+  let bestIdx = 0;
+  
+  for (let i = 0; i < period; i++) {
+    const crossL = (bufL[i-1] < 0 && bufL[i] >= 0);
+    if (crossL) {
+      // 周期性の確認
+      let correlation = 0;
+      for (let j = 0; j < Math.min(period, n-i); j++) {
+        correlation += bufL[i+j] * bufL[(i+period+j) % n];
+      }
+      if (correlation > maxCorr) {
+        maxCorr = correlation;
+        bestIdx = i;
+      }
+    }
+  }
+  return bestIdx;
+}
+
+// 位相追跡トリガー（非整数比用）
+let phaseHistory = [];
+const PHASE_HISTORY_SIZE = 10;
+
+function phaseTrackingTrigger(bufL, bufR) {
+  const n = bufL.length;
+  
+  // 現在の推定位相差を計算
+  let currentPhase = 0;
+  let peakL = -Infinity, peakR = -Infinity;
+  let peakIdxL = 0, peakIdxR = 0;
+  
+  for (let i = 0; i < n; i++) {
+    if (bufL[i] > peakL) { peakL = bufL[i]; peakIdxL = i; }
+    if (bufR[i] > peakR) { peakR = bufR[i]; peakIdxR = i; }
+  }
+  
+  currentPhase = (peakIdxR - peakIdxL) / n * TWO_PI;
+  
+  // 位相履歴を更新
+  phaseHistory.push(currentPhase);
+  if (phaseHistory.length > PHASE_HISTORY_SIZE) {
+    phaseHistory.shift();
+  }
+  
+  // 平滑化された位相差を使用
+  const avgPhase = phaseHistory.reduce((a, b) => a + b, 0) / phaseHistory.length;
+  
+  // 予測されるトリガー位置
+  const predictedTrigger = (peakIdxL + avgPhase / TWO_PI * n) % n;
+  
+  // 最も近い零交差点を探す
+  let bestIdx = Math.round(predictedTrigger);
+  let minDist = Infinity;
+  
+  for (let offset = -n/4; offset <= n/4; offset++) {
+    const i = Math.round((predictedTrigger + offset + n) % n);
+    if (i > 0 && bufL[i-1] < 0 && bufL[i] >= 0) {
+      const dist = Math.abs(offset);
+      if (dist < minDist) {
+        minDist = dist;
+        bestIdx = i;
+      }
+    }
+  }
+  
+  return Math.round(bestIdx);
+}
+
 function inPad(mx,my){
   return mx>=padX0 && mx<=padX0+padW && my>=padY0 && my<=padY0+padH;
 }
@@ -731,6 +933,29 @@ function smoothTable(table, windowSize=3){
         sum += table[idx];
         count++;
       }
+    }
+    result[i] = sum / count;
+  }
+  return result;
+}
+
+function smoothWaveform(waveform, windowSize=3){
+  const N = waveform.length;
+  const result = new Float32Array(N);
+  const halfWindow = Math.floor(windowSize / 2);
+  
+  for(let i = 0; i < N; i++){
+    let sum = 0;
+    let count = 0;
+    
+    for(let j = -halfWindow; j <= halfWindow; j++){
+      let idx = i + j;
+      // 循環的に処理（位相連続性を保つ）
+      if(idx < 0) idx += N;
+      if(idx >= N) idx -= N;
+      
+      sum += waveform[idx];
+      count++;
     }
     result[i] = sum / count;
   }
