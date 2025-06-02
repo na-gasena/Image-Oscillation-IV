@@ -70,7 +70,6 @@ let editingXY  = false;   // XY お絵描きモード
 let xyDrawPts  = [];      // XY で描いた点列
 let xyDrawingUsed = false; // XYお絵描きが使用されたかどうか
 
-let lastRatioForReset = null;  // 位相リセット判定用
 let phaseCheckInterval = 0;    // 位相チェック用カウンター
 
 let useAdaptiveTrigger = true; // 適応的トリガーの使用フラグ
@@ -120,7 +119,7 @@ function setup(){
 
   // ▼ HTML Range スライダ UI
   freqLabel   = createDiv('Freq').position(ytCXR-80, padY0-24).style('color', '#fff');
-  freqSlider  = createSlider(20, 5000, 440, 1).position(ytCXR-80, padY0).style('width','150px');
+  freqSlider  = createSlider(0, 1000, freqToSlider(440), 1).position(ytCXR-80, padY0).style('width','150px');
 
   // オクターブボタン（Freqスライダーの下に配置）
   octaveDownBtn = createButton('-').position(ytCXR-80, padY0+35).size(30, 25);
@@ -147,6 +146,10 @@ function setup(){
   prevFreqSlider = freqSlider.value();
   prevRatioSlider = ratioSlider.value();
   prevGlitchSlider = glitchSlider.value();
+  
+  // 全スライダーの統一スタイル設定
+  setupSliderStyles();
+  updateSliderAppearance(false);
 }
 
 /*
@@ -159,7 +162,8 @@ function draw(){
   // --- スライダ値の反映 (リアルタイム) ---
   // スライダ値が変化した瞬間は必ず反映
   if(freqSlider.value() !== prevFreqSlider){
-    setBaseFreq(freqSlider.value());
+    const logFreq = sliderToFreq(freqSlider.value());
+    setBaseFreq(logFreq);
     lastPlayedMidi = null; // スライダ操作時はlastPlayedMidiをリセット
     prevFreqSlider = freqSlider.value();
   }
@@ -188,7 +192,18 @@ function draw(){
   fill(255); noStroke();
   textAlign(LEFT, TOP);
   text(`Freq : ${baseFreq.toFixed(1)} Hz`, 25, 12);
-  text(`Ratio: ${ratio.toFixed(2)}`,       25, 32);
+  
+  // 整数値の場合は強調表示
+  const isIntegerRatio = Math.abs(ratio - Math.round(ratio)) < 0.001;
+  if (isIntegerRatio) {
+    fill(0, 255, 0); // 緑色で表示
+    text(`Ratio: ${ratio.toFixed(0)} `, 25, 32);
+  } else {
+    fill(255); // 通常の白色
+    text(`Ratio: ${ratio.toFixed(2)}`, 25, 32);
+  }
+  
+  fill(255); // 以降のテキストは白色に戻す
   text(`Glitch: ${glitchSteps}`,           25, 52);
   text(`Octave: ${currentOctave >= 0 ? '+' : ''}${currentOctave}`, 25, 72);
 
@@ -224,78 +239,73 @@ function setBaseFreq(f){
 
 
 function setRatio(r){
-  // 位相リセットは実際に比率が変更された時のみ実行
-  if (Math.abs(r - 1.0) < 0.05) {
-    if (lastRatioForReset !== 1.0) {
-      ratio = 1.0;
-      oscR.freq(baseFreq);
-      resetPhase();
-      lastRatioForReset = 1.0;
-    } else {
-      ratio = 1.0;
-      oscR.freq(baseFreq);
-      // 既に同期状態なら位相のみ微調整
-      syncPhases();
+  // 整数値への吸着処理
+  const snapThreshold = 0.05; // 吸着する閾値
+  const nearestInteger = Math.round(r);
+  
+  let newRatio;
+  let isSnapped = false;
+  
+  if (Math.abs(r - nearestInteger) <= snapThreshold) {
+    // 整数値に近い場合は吸着
+    newRatio = nearestInteger;
+    isSnapped = true;
+    // スライダーの値も更新（無限ループを避けるため、値が実際に変わる場合のみ）
+    if (Math.abs(ratioSlider.value() - nearestInteger) > 0.001) {
+      ratioSlider.value(nearestInteger);
+      prevRatioSlider = nearestInteger; // prevRatioSliderも更新
     }
   } else {
-    const newRatio = Math.round(r * 100) / 100;
-    if (Math.abs(newRatio - (lastRatioForReset || ratio)) > 0.01) {
-      ratio = newRatio;
-      oscR.freq(baseFreq * ratio);
-      lastRatioForReset = ratio;
+    // 通常の丸め処理
+    newRatio = Math.round(r * 100) / 100;
+    isSnapped = false;
+  }
+  
+  // スライダーのUI更新
+  updateSliderAppearance(isSnapped);
+  
+  // 実際に比率が変わった場合のみ処理
+  if (Math.abs(newRatio - ratio) > 0.001) {
+    ratio = newRatio;
+    oscR.freq(baseFreq * ratio);
+    
+    // 比率が1.0に戻った場合のみ位相を同期
+    if (Math.abs(ratio - 1.0) < 0.001) {
+      simpleSyncPhases();
     }
   }
 }
 
-function resetPhase(){
-  // 旧ノード停止（少し待ってから停止）
-  setTimeout(() => {
-    oscL.stop();
-    oscR.stop();
-  }, 10);
+// シンプルな位相同期関数
+function simpleSyncPhases() {
+  try {
+    // 両チャンネルの位相を0にリセット
+    oscL.phase(0);
+    oscR.phase(0);
+  } catch(e) {
+    console.warn('位相同期エラー:', e);
+  }
+}
 
-  // 新規ノードを同じ設定で生成
-  oscL = new p5.Oscillator('sine');
-  oscR = new p5.Oscillator('sine');
-  oscL.amp(0.5);   oscR.amp(0.5);
-  oscL.pan(-1);    oscR.pan(1);
-  
-  // 同時スタートで位相を揃える
-  oscL.start();
-  oscR.start();
-
-  // 周波数設定（同期のため右チャンネルも同じ周波数に設定）
-  oscL.freq(baseFreq);
-  oscR.freq(baseFreq * ratio);
-  
-  // 波形設定を復元
-  updateOscPeriodicWaveXY();
-
-  // FFT の入力を新ノードへバインド
-  fftL.setInput(oscL);
-  fftR.setInput(oscR);
-  
-  // 初期位相を明示的に設定
-  setTimeout(() => {
-    try {
-      oscL.phase(0);
-      oscR.phase(0);
-    } catch(e) {
-      console.warn('位相設定に失敗しました:', e);
-    }
-  }, 50);
+// 波形復元関数（現在の状態に応じて適切な波形を設定）
+function restoreWaveforms() {
+  if (xyDrawingUsed) {
+    // XY描画が使用されている場合
+    updateOscPeriodicWaveXY();
+  } else {
+    // 通常の波形（基本波形またはカスタム描画）
+    updateOscPeriodicWave();
+  }
 }
 
 // 位相同期関数（軽量版）
 function syncPhases(){
-  // 現在の位相を取得して右チャンネルを左チャンネルに合わせる
-  try {
-    oscR.phase(0);
-    oscL.phase(0);
-  } catch(e) {
-    // フォールバック：位相設定に失敗した場合はリセット
-    resetPhase();
+  // 比率が1.0でない場合は同期を行わない
+  if (Math.abs(ratio - 1.0) > 0.001) {
+    return;
   }
+  
+  simpleSyncPhases();
 }
 
 function noteOn(midi){
@@ -316,6 +326,10 @@ function changeOctave(direction) {
     const newMidi = lastPlayedMidi + (currentOctave * 12);
     const f = midiToFreq(newMidi);
     setBaseFreq(f);
+    
+    // スライダーの値も更新（対数スケール）
+    freqSlider.value(freqToSlider(f));
+    prevFreqSlider = freqSlider.value();
   }
 }
 
@@ -982,4 +996,153 @@ function syncKeyboardNotes(){
       }
     }
   }
+}
+
+// 全スライダーの統一スタイル設定
+function setupSliderStyles() {
+  const baseSliderStyle = `
+    <style id="base-slider-style">
+      input[type="range"] {
+        -webkit-appearance: none !important;
+        appearance: none !important;
+        height: 8px !important;
+        background: #666 !important;
+        outline: none !important;
+        border-radius: 4px !important;
+        border: none !important;
+      }
+      input[type="range"]::-webkit-slider-track {
+        -webkit-appearance: none !important;
+        appearance: none !important;
+        height: 8px !important;
+        background: #666 !important;
+        border-radius: 4px !important;
+      }
+      input[type="range"]::-moz-range-track {
+        height: 8px !important;
+        background: #666 !important;
+        border-radius: 4px !important;
+        border: none !important;
+      }
+    </style>
+  `;
+  
+  // 既存のベーススタイルを削除してから新しいスタイルを追加
+  const existingBaseStyle = document.getElementById('base-slider-style');
+  if (existingBaseStyle) existingBaseStyle.remove();
+  document.head.insertAdjacentHTML('beforeend', baseSliderStyle);
+}
+
+// スライダーの見た目を更新する関数
+function updateSliderAppearance(isSnapped) {
+  if (isSnapped) {
+    // ratioSliderのみSNAP状態：特定のスライダーだけ緑色で大きなつまみ
+    // まず、ratioSliderにユニークなクラスを追加
+    ratioSlider.addClass('ratio-snapped');
+    
+    const snapStyle = `
+      <style id="slider-thumb-style">
+        /* 通常のスライダー */
+        input[type="range"]::-webkit-slider-thumb {
+          -webkit-appearance: none !important;
+          appearance: none !important;
+          height: 18px !important;
+          width: 18px !important;
+          border-radius: 50% !important;
+          background: #fff !important;
+          border: 2px solid #888 !important;
+          cursor: pointer !important;
+          box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3) !important;
+        }
+        input[type="range"]::-moz-range-thumb {
+          height: 18px !important;
+          width: 18px !important;
+          border-radius: 50% !important;
+          background: #fff !important;
+          border: 2px solid #888 !important;
+          cursor: pointer !important;
+          box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3) !important;
+          -moz-appearance: none !important;
+        }
+        
+        /* ratioSliderのSNAP状態のみ */
+        input[type="range"].ratio-snapped::-webkit-slider-thumb {
+          height: 24px !important;
+          width: 24px !important;
+          background: #00ff00 !important;
+          border: 2px solid #fff !important;
+          box-shadow: 0 0 8px rgba(0, 255, 0, 0.5) !important;
+        }
+        input[type="range"].ratio-snapped::-moz-range-thumb {
+          height: 24px !important;
+          width: 24px !important;
+          background: #00ff00 !important;
+          border: 2px solid #fff !important;
+          box-shadow: 0 0 8px rgba(0, 255, 0, 0.5) !important;
+        }
+      </style>
+    `;
+    
+    // 既存のスタイルを削除してから新しいスタイルを追加
+    const existingStyle = document.getElementById('slider-thumb-style');
+    if (existingStyle) existingStyle.remove();
+    document.head.insertAdjacentHTML('beforeend', snapStyle);
+    
+  } else {
+    // ratioSliderのクラスを削除
+    ratioSlider.removeClass('ratio-snapped');
+    
+    // 全スライダーの通常状態：統一された白いつまみ
+    const normalStyle = `
+      <style id="slider-thumb-style">
+        input[type="range"]::-webkit-slider-thumb {
+          -webkit-appearance: none !important;
+          appearance: none !important;
+          height: 18px !important;
+          width: 18px !important;
+          border-radius: 50% !important;
+          background: #fff !important;
+          border: 2px solid #888 !important;
+          cursor: pointer !important;
+          box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3) !important;
+        }
+        input[type="range"]::-moz-range-thumb {
+          height: 18px !important;
+          width: 18px !important;
+          border-radius: 50% !important;
+          background: #fff !important;
+          border: 2px solid #888 !important;
+          cursor: pointer !important;
+          box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3) !important;
+          -moz-appearance: none !important;
+        }
+      </style>
+    `;
+    
+    // 既存のスタイルを削除してから新しいスタイルを追加
+    const existingStyle = document.getElementById('slider-thumb-style');
+    if (existingStyle) existingStyle.remove();
+    document.head.insertAdjacentHTML('beforeend', normalStyle);
+  }
+}
+
+function freqToSlider(frequency) {
+  // 周波数(20-5000Hz)をスライダー値(0-1000)に変換
+  const minFreq = 20;
+  const maxFreq = 5000;
+  const logMin = Math.log(minFreq);
+  const logMax = Math.log(maxFreq);
+  const logValue = Math.log(Math.max(minFreq, Math.min(maxFreq, frequency)));
+  return Math.round((logValue - logMin) / (logMax - logMin) * 1000);
+}
+
+// 周波数スライダーの対数変換関数
+function sliderToFreq(sliderValue) {
+  // スライダー値(0-1000)を周波数(20-5000Hz)の対数スケールに変換
+  const minFreq = 20;
+  const maxFreq = 5000;
+  const logMin = Math.log(minFreq);
+  const logMax = Math.log(maxFreq);
+  const logValue = logMin + (sliderValue / 1000) * (logMax - logMin);
+  return Math.exp(logValue);
 }
