@@ -19,11 +19,6 @@ let crushedTable  = new Float32Array(TABLE_SIZE);
 let glitchSteps   = 64;      // 量子化分解能 (4–64)
 let periodicWave  = null;    // Web Audio の PeriodicWave インスタンス
 
-// レスポンシブ対応用の変数
-const BASE_WIDTH = 1280;
-const BASE_HEIGHT = 720;
-let scaleFactor = 1.0;
-
 // ––––– UI 要素 (HTML)
 let freqLabel, freqSlider, ratioLabel, ratioSlider, glitchLabel, glitchSlider;  // p5.dom range input
 let octaveUpBtn, octaveDownBtn; // オクターブ変更ボタン
@@ -88,24 +83,7 @@ let useAdaptiveTrigger = true; // 適応的トリガーの使用フラグ
  初期化: setup()
 ──────────────────────────────────────────────*/
 function setup(){
-  // ウィンドウサイズに応じてキャンバスサイズとスケール係数を計算
-  const aspectRatio = BASE_WIDTH / BASE_HEIGHT; // 16:9
-  let canvasWidth, canvasHeight;
-  
-  if (windowWidth / windowHeight > aspectRatio) {
-    // ウィンドウが横長の場合、高さを基準にする
-    canvasHeight = windowHeight * 0.95;
-    canvasWidth = canvasHeight * aspectRatio;
-  } else {
-    // ウィンドウが縦長の場合、幅を基準にする
-    canvasWidth = windowWidth * 0.95;
-    canvasHeight = canvasWidth / aspectRatio;
-  }
-  
-  // スケール係数を計算
-  scaleFactor = Math.min(canvasWidth / BASE_WIDTH, canvasHeight / BASE_HEIGHT);
-  
-  createCanvas(canvasWidth, canvasHeight);
+  createCanvas(1280, 720);
   pixelDensity(1);
 
   // ▼ オシレータ初期化 (デフォルト Sine, hard‑pan L/R)
@@ -119,11 +97,44 @@ function setup(){
   fftL = new p5.FFT(0, 1024); fftL.setInput(oscL);
   fftR = new p5.FFT(0, 1024); fftR.setInput(oscR);
 
-  // ▼ レイアウト計算 (元の固定値ベース)
-  calculateLayoutBase();
+  // ▼ レイアウト計算 (Processing スケッチと同じ式)
+  ytR    = (height * 0.25 - 20) / 2;
+  ytCY   = ytR + 50;
+  ytCXL  = ytR + 150;
+  ytCXR  = width - ytR - 150;
+
+  xySize = height * 0.50;
+  xyX0   = (width - xySize) / 2;
+  xyY0   = ytCY + ytR - 30;
+
+  padW   = xySize * 0.4;
+  padH   = 90;
+  padX0  = (width - padW) / 2;
+  padY0  = xyY0 + xySize + 10;
+
+  keyY   = padY0 + padH + 40;
+
+  waveBtnY = xyY0 + 130;
+  const startX = ytCXL - 70;
+  for(let i=0;i<3;i++) waveBtnX[i] = startX + i * (waveBtnR*2 + 20);
 
   // ▼ HTML Range スライダ UI
-  updateUIElements();
+  freqLabel   = createDiv('Freq').position(ytCXR-80, padY0-24).style('color', '#fff');
+  freqSlider  = createSlider(20, 5000, 440, 1).position(ytCXR-80, padY0).style('width','150px');
+
+  // オクターブボタン（Freqスライダーの下に配置）
+  octaveDownBtn = createButton('-').position(ytCXR-80, padY0+35).size(30, 25);
+  octaveUpBtn = createButton('+').position(ytCXR-45, padY0+35).size(30, 25);
+  octaveDownBtn.mousePressed(() => changeOctave(-1));
+  octaveUpBtn.mousePressed(() => changeOctave(1));
+  octaveDownBtn.style('background-color', '#444').style('color', '#fff').style('border', '1px solid #666');
+  octaveUpBtn.style('background-color', '#444').style('color', '#fff').style('border', '1px solid #666');
+
+  ratioLabel  = createDiv('Ratio').position(ytCXL-80, padY0-24).style('color', '#fff');
+  ratioSlider = createSlider(0.1, 4.0, 1.0, 0.01).position(ytCXL-80, padY0).style('width','150px');
+
+  glitchLabel = createDiv('Glitch').position(ytCXL-80, padY0+16).style('color', '#fff');
+  glitchSlider= createSlider(4, 64, 64, 1).position(ytCXL-80, padY0+40).style('width','150px');
 
   // ▼ デフォルト波形配列生成 (Sine)
   setDefaultWave('sine');
@@ -138,111 +149,12 @@ function setup(){
   prevGlitchSlider = glitchSlider.value();
 }
 
-// 元のレイアウト計算（BASE_WIDTH x BASE_HEIGHTベース）
-function calculateLayoutBase() {
-  ytR    = (BASE_HEIGHT * 0.25 - 20) / 2;
-  ytCY   = ytR + 50;
-  ytCXL  = ytR + 150;
-  ytCXR  = BASE_WIDTH - ytR - 150;
-
-  xySize = BASE_HEIGHT * 0.50;
-  xyX0   = (BASE_WIDTH - xySize) / 2;
-  xyY0   = ytCY + ytR - 30;
-
-  padW   = xySize * 0.4;
-  padH   = 90;
-  padX0  = (BASE_WIDTH - padW) / 2;
-  padY0  = xyY0 + xySize + 10;
-
-  keyY   = padY0 + padH + 40;
-
-  waveBtnY = xyY0 + 130;
-  const startX = ytCXL - 70;
-  for(let i=0;i<3;i++) waveBtnX[i] = startX + i * (waveBtnR*2 + 20);
-}
-
-// UI要素の作成・更新
-function updateUIElements() {
-  // 既存要素を削除
-  if (freqLabel) freqLabel.remove();
-  if (freqSlider) freqSlider.remove();
-  if (octaveDownBtn) octaveDownBtn.remove();
-  if (octaveUpBtn) octaveUpBtn.remove();
-  if (ratioLabel) ratioLabel.remove();
-  if (ratioSlider) ratioSlider.remove();
-  if (glitchLabel) glitchLabel.remove();
-  if (glitchSlider) glitchSlider.remove();
-
-  // スケールされた位置を計算
-  const canvasLeft = (windowWidth - width) / 2;
-  const canvasTop = (windowHeight - height) / 2;
-
-  freqLabel = createDiv('Freq')
-    .position(canvasLeft + (ytCXR-80) * scaleFactor, canvasTop + (padY0-24) * scaleFactor)
-    .style('color', '#fff');
-  freqSlider = createSlider(20, 5000, 440, 1)
-    .position(canvasLeft + (ytCXR-80) * scaleFactor, canvasTop + padY0 * scaleFactor)
-    .style('width', (150 * scaleFactor) + 'px');
-
-  octaveDownBtn = createButton('-')
-    .position(canvasLeft + (ytCXR-80) * scaleFactor, canvasTop + (padY0+35) * scaleFactor)
-    .size(30 * scaleFactor, 25 * scaleFactor);
-  octaveUpBtn = createButton('+')
-    .position(canvasLeft + (ytCXR-45) * scaleFactor, canvasTop + (padY0+35) * scaleFactor)
-    .size(30 * scaleFactor, 25 * scaleFactor);
-  
-  octaveDownBtn.mousePressed(() => changeOctave(-1));
-  octaveUpBtn.mousePressed(() => changeOctave(1));
-  octaveDownBtn.style('background-color', '#444').style('color', '#fff').style('border', '1px solid #666');
-  octaveUpBtn.style('background-color', '#444').style('color', '#fff').style('border', '1px solid #666');
-
-  ratioLabel = createDiv('Ratio')
-    .position(canvasLeft + (ytCXL-80) * scaleFactor, canvasTop + (padY0-24) * scaleFactor)
-    .style('color', '#fff');
-  ratioSlider = createSlider(0.1, 4.0, 1.0, 0.01)
-    .position(canvasLeft + (ytCXL-80) * scaleFactor, canvasTop + padY0 * scaleFactor)
-    .style('width', (150 * scaleFactor) + 'px');
-
-  glitchLabel = createDiv('Glitch')
-    .position(canvasLeft + (ytCXL-80) * scaleFactor, canvasTop + (padY0+16) * scaleFactor)
-    .style('color', '#fff');
-  glitchSlider = createSlider(4, 64, 64, 1)
-    .position(canvasLeft + (ytCXL-80) * scaleFactor, canvasTop + (padY0+40) * scaleFactor)
-    .style('width', (150 * scaleFactor) + 'px');
-}
-
-// ウィンドウサイズ変更時の処理
-function windowResized() {
-  const aspectRatio = BASE_WIDTH / BASE_HEIGHT;
-  let canvasWidth, canvasHeight;
-  
-  if (windowWidth / windowHeight > aspectRatio) {
-    canvasHeight = windowHeight * 0.95;
-    canvasWidth = canvasHeight * aspectRatio;
-  } else {
-    canvasWidth = windowWidth * 0.95;
-    canvasHeight = canvasWidth / aspectRatio;
-  }
-  
-  // スケール係数を再計算
-  scaleFactor = Math.min(canvasWidth / BASE_WIDTH, canvasHeight / BASE_HEIGHT);
-  
-  resizeCanvas(canvasWidth, canvasHeight);
-  updateUIElements();
-}
-
 /*
 ──────────────────────────────────────────────
  毎フレーム描画: draw()
 ──────────────────────────────────────────────*/
 function draw(){
   background(0);
-
-  // スケール変換とキャンバス中央配置
-  push();
-  translate(width/2, height/2);
-  scale(scaleFactor);
-  translate(-BASE_WIDTH/2, -BASE_HEIGHT/2);
 
   // --- スライダ値の反映 (リアルタイム) ---
   // スライダ値が変化した瞬間は必ず反映
@@ -280,8 +192,6 @@ function draw(){
   text(`Glitch: ${glitchSteps}`,           25, 52);
   text(`Octave: ${currentOctave >= 0 ? '+' : ''}${currentOctave}`, 25, 72);
 
-  pop(); // スケール変換を元に戻す
-
   // ––– アルペジエータ (Up モード固定)
   const stepDur = 60000 / BPM_FIXED / DIV_FIXED;
   if(notesHeld.length > 0){
@@ -300,19 +210,6 @@ function draw(){
   }
 
   syncKeyboardNotes();
-}
-
-// マウス座標をベース座標系に変換するヘルパー関数
-function getBaseMouseX() {
-  const canvasX = mouseX - width/2;
-  const baseX = canvasX / scaleFactor + BASE_WIDTH/2;
-  return baseX;
-}
-
-function getBaseMouseY() {
-  const canvasY = mouseY - height/2;
-  const baseY = canvasY / scaleFactor + BASE_HEIGHT/2;
-  return baseY;
 }
 
 /*
@@ -541,13 +438,10 @@ function mousePressed(){
   // ▼ AudioContext を許可 (初回のみ)
   if(getAudioContext().state !== 'running') getAudioContext().resume();
 
-  const baseMX = getBaseMouseX();
-  const baseMY = getBaseMouseY();
-
   // ▼ 鍵盤クリック判定
   for(let i=0;i<12;i++){
     const kx = padX0 + padW * i / 4 - 120;
-    if(dist(baseMX, baseMY, kx, keyY) < keyR){
+    if(dist(mouseX, mouseY, kx, keyY) < keyR){
       if(!uiKeyOn[i]){
         uiKeyOn[i] = true;
         const m = midiKeys[i];
@@ -561,39 +455,37 @@ function mousePressed(){
 
   // ▼ 波形切替ボタン判定
   for(let i=0;i<3;i++){
-    if(dist(baseMX, baseMY, waveBtnX[i], waveBtnY) < waveBtnR){
+    if(dist(mouseX, mouseY, waveBtnX[i], waveBtnY) < waveBtnR){
       changeWaveIndex(i);
       return;
     }
   }
 
   // ▼ カスタム波形パッド開始
-  if(inPadBase(baseMX, baseMY)) {
+  if(inPad(mouseX, mouseY)) {
     editing = true;
-    prevPadIdx = int(map(baseMX, padX0, padX0+padW, 0, TABLE_SIZE-1));
+    prevPadIdx = int(map(mouseX, padX0, padX0+padW, 0, TABLE_SIZE-1));
     prevPadIdx = constrain(prevPadIdx, 0, TABLE_SIZE-1);
-    prevPadY   = baseMY;
+    prevPadY   = mouseY;
     // 1点目も描画
-    customTable[prevPadIdx]  = map(baseMY, padY0, padY0+padH, 1, -1);
+    customTable[prevPadIdx]  = map(mouseY, padY0, padY0+padH, 1, -1);
     crushedTable[prevPadIdx] = customTable[prevPadIdx];
     applyGlitch();
   }
 
   // ▼ XY 描画開始判定
-  if (!editing && mxInXYBase(baseMX, baseMY)) {
+  if (!editing && mxInXY(mouseX, mouseY)) {
     editingXY = true;
-    xyDrawPts = [{ x: baseMX, y: baseMY }];
+    xyDrawPts = [{ x: mouseX, y: mouseY }];
+    //xyDrawPts.push({ x: mouseX, y: mouseY }); //
   }
 }
 
 function mouseDragged(){
-  const baseMX = getBaseMouseX();
-  const baseMY = getBaseMouseY();
-
-  if(editing && inPadBase(baseMX, baseMY)){
-    let idx = int(map(baseMX, padX0, padX0+padW, 0, TABLE_SIZE-1));
+  if(editing && inPad(mouseX, mouseY)){
+    let idx = int(map(mouseX, padX0, padX0+padW, 0, TABLE_SIZE-1));
     idx = constrain(idx, 0, TABLE_SIZE-1);
-    let y  = baseMY;
+    let y  = mouseY;
 
     if(prevPadIdx !== null){
       // 線形補間
@@ -616,10 +508,12 @@ function mouseDragged(){
     applyGlitch();
   }
 
-  if (editingXY && mxInXYBase(baseMX, baseMY)) {
-    xyDrawPts.push({ x: baseMX, y: baseMY });
+  if (editingXY && mxInXY(mouseX, mouseY)) {
+    xyDrawPts.push({ x: mouseX, y: mouseY });
     updateTablesFromXY(xyDrawPts);      // ★リアルタイム更新
   }
+  
+  
 }
 
 function mouseReleased(){
@@ -646,6 +540,7 @@ function mouseReleased(){
       updateTablesFromXY(xyDrawPts);    // ★最終確定
     }
   }  
+  
 }
 
 /*
@@ -761,7 +656,7 @@ function drawUIWaveButtons(){
 
 /* ── XY 描画用関数 ── */
 // XY 域内か判定
-function mxInXYBase(x, y) {
+function mxInXY(x, y) {
   return x >= xyX0 && x <= xyX0 + xySize && y >= xyY0 && y <= xyY0 + xySize;
 }
 
@@ -1011,10 +906,9 @@ function phaseTrackingTrigger(bufL, bufR) {
   return Math.round(bestIdx);
 }
 
-function inPadBase(mx,my){
+function inPad(mx,my){
   return mx>=padX0 && mx<=padX0+padW && my>=padY0 && my<=padY0+padH;
 }
-
 function keyToMidi(k){
   switch(k){
     case 'a':return 60; case 'w':return 61; case 's':return 62; case 'e':return 63;
