@@ -477,6 +477,12 @@ function drawUIKeys(){
     const kx = padX0 + padW * i / 4 - 120;
     fill(uiKeyOn[i] ? color(0,255,0) : 50);
     noStroke(); circle(kx, keyY, keyR*2);
+    
+    // キーラベルを描画
+    fill(255); // 白い文字
+    textAlign(CENTER, CENTER);
+    textSize(12);
+    text(midiKeyChars[i].toUpperCase(), kx, keyY + keyR + 12);
   }
 }
 
@@ -484,6 +490,12 @@ function drawUIWaveButtons(){
   for(let i=0;i<3;i++){
     fill(waveOn[i] ? color(0,255,0) : 50);
     noStroke(); circle(waveBtnX[i], waveBtnY, waveBtnR*2);
+    
+    // キーラベルを描画
+    fill(255); // 白い文字
+    textAlign(CENTER, CENTER);
+    textSize(12);
+    text((i + 1).toString(), waveBtnX[i], waveBtnY + waveBtnR + 12);
   }
 }
 
