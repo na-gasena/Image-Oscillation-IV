@@ -21,6 +21,8 @@ let periodicWave  = null;    // Web Audio の PeriodicWave インスタンス
 
 // ––––– UI 要素 (HTML)
 let freqLabel, freqSlider, ratioLabel, ratioSlider, glitchLabel, glitchSlider;  // p5.dom range input
+let octaveUpBtn, octaveDownBtn; // オクターブ変更ボタン
+let currentOctave = 0; // 現在のオクターブオフセット（-2から+2程度）
 
 // ––––– レイアウト座標 (Processing 版に合わせて計算)
 let ytR, ytCY, ytCXL, ytCXR; // Y‑T 円表示の中心・半径
@@ -65,6 +67,7 @@ let crushedTableR = new Float32Array(TABLE_SIZE);   // 右チャンネル量子�
 
 let editingXY  = false;   // XY お絵描きモード
 let xyDrawPts  = [];      // XY で描いた点列
+let xyDrawingUsed = false; // XYお絵描きが使用されたかどうか
 
 
 
@@ -112,6 +115,14 @@ function setup(){
   // ▼ HTML Range スライダ UI
   freqLabel   = createDiv('Freq').position(ytCXR-80, padY0-24).style('color', '#fff');
   freqSlider  = createSlider(20, 5000, 440, 1).position(ytCXR-80, padY0).style('width','150px');
+
+  // オクターブボタン（Freqスライダーの下に配置）
+  octaveDownBtn = createButton('-').position(ytCXR-80, padY0+35).size(30, 25);
+  octaveUpBtn = createButton('+').position(ytCXR-45, padY0+35).size(30, 25);
+  octaveDownBtn.mousePressed(() => changeOctave(-1));
+  octaveUpBtn.mousePressed(() => changeOctave(1));
+  octaveDownBtn.style('background-color', '#444').style('color', '#fff').style('border', '1px solid #666');
+  octaveUpBtn.style('background-color', '#444').style('color', '#fff').style('border', '1px solid #666');
 
   ratioLabel  = createDiv('Ratio').position(ytCXL-80, padY0-24).style('color', '#fff');
   ratioSlider = createSlider(0.1, 4.0, 1.0, 0.01).position(ytCXL-80, padY0).style('width','150px');
@@ -172,6 +183,7 @@ function draw(){
   text(`Freq : ${baseFreq.toFixed(1)} Hz`, 25, 12);
   text(`Ratio: ${ratio.toFixed(2)}`,       25, 32);
   text(`Glitch: ${glitchSteps}`,           25, 52);
+  text(`Octave: ${currentOctave >= 0 ? '+' : ''}${currentOctave}`, 25, 72);
 
   // ––– アルペジエータ (Up モード固定)
   const stepDur = 60000 / BPM_FIXED / DIV_FIXED;
@@ -235,9 +247,24 @@ function resetPhase(){
 
 
 function noteOn(midi){
-  const f = midiToFreq(midi); // p5.sound 付属
+  // オクターブオフセットを適用
+  const adjustedMidi = midi + (currentOctave * 12);
+  const f = midiToFreq(adjustedMidi); // p5.sound 付属
   setBaseFreq(f);
-  lastPlayedMidi = midi;
+  lastPlayedMidi = midi; // 元のMIDIノートを保存（オフセット前）
+}
+
+// オクターブ変更機能
+function changeOctave(direction) {
+  // オクターブ範囲を制限（-3から+3）
+  currentOctave = constrain(currentOctave + direction, -3, 3);
+  
+  // 現在演奏中のMIDIノートがある場合、オクターブ変更を適用
+  if (lastPlayedMidi !== null) {
+    const newMidi = lastPlayedMidi + (currentOctave * 12);
+    const f = midiToFreq(newMidi);
+    setBaseFreq(f);
+  }
 }
 
 /* －－ 波形関連 －－ */
@@ -253,7 +280,13 @@ function setDefaultWave(type){
 function applyGlitch(){
   const q = 2.0 / glitchSteps;
   for(let i=0;i<TABLE_SIZE;i++) crushedTable[i] = Math.round(customTable[i]/q)*q;
-  updateOscPeriodicWave(); // 必ず呼ぶ
+  
+  // XYお絵描き後の場合は左チャンネルのみ更新、それ以外は左右リンク
+  if (xyDrawingUsed) {
+    updateOscPeriodicWaveLeft(); // 左チャンネルのみ更新
+  } else {
+    updateOscPeriodicWave(); // 従来通り左右リンク
+  }
 }
 function updateOscPeriodicWave(){
   const ac    = getAudioContext();
@@ -282,11 +315,41 @@ function updateOscPeriodicWave(){
   oscR.oscillator.setPeriodicWave(periodicWave);
 }
 
+// 左チャンネルのみを更新する関数
+function updateOscPeriodicWaveLeft(){
+  const ac    = getAudioContext();
+  const N     = TABLE_SIZE;
+  const harmonics = N/2;
+  const real  = new Float32Array(harmonics);
+  const imag  = new Float32Array(harmonics);
+
+  // DC成分は0
+  real[0] = 0;
+  imag[0] = 0;
+
+  // DFTで各ハーモニクス成分を計算
+  for(let k=1;k<harmonics;k++){
+    let sumRe = 0, sumIm = 0;
+    for(let n=0;n<N;n++){
+      const phase = TWO_PI * k * n / N;
+      sumRe += crushedTable[n] * Math.cos(phase);
+      sumIm += -crushedTable[n] * Math.sin(phase);
+    }
+    real[k] = sumRe / N;
+    imag[k] = sumIm / N;
+  }
+  const periodicWaveLeft = ac.createPeriodicWave(real, imag, {disableNormalization:true});
+  oscL.oscillator.setPeriodicWave(periodicWaveLeft); // 左チャンネルのみ更新
+}
+
 function changeWaveIndex(idx){
   // idx: 0=Sine 1=Tri 2=Square
   const mapping = ['sine','triangle','square'];
   currentWave = mapping[idx];
   waveOn = waveOn.map((_, i) => i === idx);
+
+  // XYお絵描きフラグをリセット（基本波形に戻したため）
+  xyDrawingUsed = false;
 
   setDefaultWave(currentWave);          // customTable（L）を生成
                                         // ↓ ここから追加 ----------------
@@ -308,6 +371,11 @@ function changeWaveIndex(idx){
 function keyPressed(){
   // 数字キー 1–3 → 波形切替
   if(key>='1' && key<='3') changeWaveIndex(int(key)-1);
+  
+  // オクターブ変更キー
+  if(key === ';') changeOctave(1);  // +キーでオクターブアップ
+  if(key === '-') changeOctave(-1); // =キーでオクターブダウン
+  
   if(keyCode === TAB) return false;
 }
 function keyReleased(){
@@ -542,6 +610,9 @@ function updateOscPeriodicWaveXY() {
 
 function updateTablesFromXY(points){
   if (points.length < 2) return;
+
+  // XYお絵描きが使用されたフラグを設定
+  xyDrawingUsed = true;
 
   /* -------- マウス座標を直接 -1〜+1 にマップ -------- */
   const toNorm = p => ({
