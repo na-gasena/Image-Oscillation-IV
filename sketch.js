@@ -1089,3 +1089,142 @@ function syncKeyboardNotes(){
     }
   }
 }
+
+/*
+──────────────────────────────────────────────
+ タッチイベント（スマホ・タブレット対応）
+──────────────────────────────────────────────*/
+function touchStarted(){
+  // AudioContext を許可（初回のみ）
+  if(getAudioContext().state !== 'running') getAudioContext().resume();
+
+  // タッチ座標を取得（最初のタッチポイントを使用）
+  if (touches.length > 0) {
+    const touch = touches[0];
+    const baseTX = getTouchBaseX(touch.x);
+    const baseTY = getTouchBaseY(touch.y);
+
+    // 鍵盤クリック判定
+    for(let i=0;i<12;i++){
+      const kx = padX0 + padW * i / 4 - 120;
+      if(dist(baseTX, baseTY, kx, keyY) < keyR){
+        if(!uiKeyOn[i]){
+          uiKeyOn[i] = true;
+          const m = midiKeys[i];
+          if(!notesHeld.includes(m)) notesHeld.push(m);
+          arpIndex = 0;
+        }
+        mouseKeyDownIndex = i;
+        return false; // デフォルト動作を防ぐ
+      }
+    }
+
+    // 波形切替ボタン判定
+    for(let i=0;i<3;i++){
+      if(dist(baseTX, baseTY, waveBtnX[i], waveBtnY) < waveBtnR){
+        changeWaveIndex(i);
+        return false;
+      }
+    }
+
+    // カスタム波形パッド開始
+    if(inPadBase(baseTX, baseTY)) {
+      editing = true;
+      prevPadIdx = int(map(baseTX, padX0, padX0+padW, 0, TABLE_SIZE-1));
+      prevPadIdx = constrain(prevPadIdx, 0, TABLE_SIZE-1);
+      prevPadY   = baseTY;
+      customTable[prevPadIdx]  = map(baseTY, padY0, padY0+padH, 1, -1);
+      crushedTable[prevPadIdx] = customTable[prevPadIdx];
+      applyGlitch();
+      return false;
+    }
+
+    // XY 描画開始判定
+    if (!editing && mxInXYBase(baseTX, baseTY)) {
+      editingXY = true;
+      xyDrawPts = [{ x: baseTX, y: baseTY }];
+      return false;
+    }
+  }
+  
+  return false; // デフォルトのタッチ動作を防ぐ
+}
+
+function touchMoved(){
+  if (touches.length > 0) {
+    const touch = touches[0];
+    const baseTX = getTouchBaseX(touch.x);
+    const baseTY = getTouchBaseY(touch.y);
+
+    if(editing && inPadBase(baseTX, baseTY)){
+      let idx = int(map(baseTX, padX0, padX0+padW, 0, TABLE_SIZE-1));
+      idx = constrain(idx, 0, TABLE_SIZE-1);
+      let y  = baseTY;
+
+      if(prevPadIdx !== null){
+        let from = prevPadIdx;
+        let to   = idx;
+        if(from > to){ [from, to] = [to, from]; }
+        for(let i=from; i<=to; i++){
+          let t = (to === from) ? 0 : (i - from) / (to - from);
+          let interpY = prevPadY + (y - prevPadY) * t;
+          customTable[i]  = map(interpY, padY0, padY0+padH, 1, -1);
+          crushedTable[i] = customTable[i];
+        }
+      }else{
+        customTable[idx]  = map(y, padY0, padY0+padH, 1, -1);
+        crushedTable[idx] = customTable[idx];
+      }
+      prevPadIdx = idx;
+      prevPadY   = y;
+      applyGlitch();
+    }
+
+    if (editingXY && mxInXYBase(baseTX, baseTY)) {
+      xyDrawPts.push({ x: baseTX, y: baseTY });
+      updateTablesFromXY(xyDrawPts);
+    }
+  }
+  
+  return false; // スクロールを防ぐ
+}
+
+function touchEnded(){
+  if(editing){
+    editing = false;
+    prevPadIdx = null;
+    prevPadY   = null;
+  }
+
+  if(mouseKeyDownIndex !== null){
+    if(uiKeyOn[mouseKeyDownIndex]){
+      uiKeyOn[mouseKeyDownIndex] = false;
+      const m = midiKeys[mouseKeyDownIndex];
+      notesHeld = notesHeld.filter(v=>v!==m);
+      arpIndex = 0;
+    }
+    mouseKeyDownIndex = null;
+  }
+
+  if (editingXY) {
+    editingXY = false;
+    if (xyDrawPts.length > 4) {
+      updateTablesFromXY(xyDrawPts);
+    }
+  }
+  
+  return false;
+}
+
+// タッチ座標をベース座標系に変換するヘルパー関数
+function getTouchBaseX(touchX) {
+  const canvasX = touchX - width/2;
+  const baseX = canvasX / scaleFactor + BASE_WIDTH/2;
+  return baseX;
+}
+
+function getTouchBaseY(touchY) {
+  const canvasY = touchY - height/2;
+  const baseY = canvasY / scaleFactor + BASE_HEIGHT/2;
+  return baseY;
+}
